@@ -74,7 +74,7 @@ class DashboardRenderer:
     STATUS_WARN = "[!!]"
     STATUS_OFFLINE = "[--]"
 
-    WIDTH = 36  # Narrower for mobile
+    WIDTH = 42  # Width for mobile
 
     def __init__(self):
         self.last_update: Optional[datetime] = None
@@ -145,8 +145,8 @@ class DashboardRenderer:
             cpu = self._format_percent(server.cpu_percent)
             mem = self._format_percent(server.mem_percent)
             stat = self._format_status(server.status)
-            name = server.name[:10].ljust(10)
-            line = f"{name} CPU:{cpu} MEM:{mem} [{stat}]"
+            name = server.name[:16].ljust(16)
+            line = f"{name} C:{cpu} M:{mem} [{stat}]"
             lines.append(self._row(line))
 
         # Containers section
@@ -157,12 +157,11 @@ class DashboardRenderer:
         running = [c for c in containers if c.status == ContainerStatus.RUNNING]
         stopped = [c for c in containers if c.status != ContainerStatus.RUNNING]
 
-        if running:
-            names = ", ".join([c.name[:8] for c in running[:4]])
-            lines.append(self._row(f"[+] {names}"))
+        for c in running[:3]:
+            lines.append(self._row(f"[+] {c.name[:32]} ({c.uptime})"))
 
         for c in stopped[:2]:
-            lines.append(self._row(f"[-] {c.name} ({c.uptime})"))
+            lines.append(self._row(f"[-] {c.name[:32]} ({c.uptime})"))
 
         # Alerts section
         if alerts:

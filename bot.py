@@ -148,7 +148,7 @@ class RealDataProvider:
         import subprocess
         import socket
 
-        hostname = socket.gethostname()[:15]
+        hostname = socket.gethostname()[:20]
         metrics = ServerMetrics(
             name=hostname,
             cpu_percent=None,
@@ -215,7 +215,7 @@ class RealDataProvider:
                         continue
                     parts = line.split('|')
                     if len(parts) >= 3:
-                        name = parts[0][:15]
+                        name = parts[0][:20]
                         status_text = parts[1]
                         state = parts[2].lower()
 
@@ -557,6 +557,7 @@ COMMANDS:
   /servers - List all servers
   /alerts  - View active alerts
   /history - Alert history
+  /logs    - Container logs
   /config  - Bot settings
   /help    - This help
 
@@ -616,6 +617,63 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@authorized
+async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /logs command - show container logs."""
+    containers = monitor.get_containers()
+
+    if not containers:
+        await update.message.reply_text("```\nNo containers found.\n```", parse_mode="MarkdownV2")
+        return
+
+    lines = [
+        "+======================================+",
+        "| SELECT CONTAINER FOR LOGS            |",
+        "+--------------------------------------+",
+    ]
+
+    # Create buttons for each container
+    buttons = []
+    for c in containers:
+        status = "+" if c.status == ContainerStatus.RUNNING else "-"
+        lines.append(f"| [{status}] {c.name:<32} |")
+        buttons.append([InlineKeyboardButton(
+            f"{c.name}",
+            callback_data=f"logs:{c.name}"
+        )])
+
+    lines.append("+======================================+")
+
+    buttons.append([InlineKeyboardButton("Back", callback_data="menu:dashboard")])
+    keyboard = InlineKeyboardMarkup(buttons)
+
+    await update.message.reply_text(
+        f"```\n{chr(10).join(lines)}\n```",
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard
+    )
+
+
+async def get_container_logs(container_name: str, lines: int = 30) -> str:
+    """Get logs from a Docker container."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["docker", "logs", container_name, "--tail", str(lines)],
+            capture_output=True, text=True, timeout=10
+        )
+        # Docker logs go to stderr for some containers
+        output = result.stdout or result.stderr
+        if output:
+            return output.strip()
+        return "No logs available"
+    except subprocess.TimeoutExpired:
+        return "Timeout getting logs"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 # === Callback Handlers ===
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -641,6 +699,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_servers_callback(query, parts, context)
         elif parts[0] == "history":
             await query.answer("Use /history command")
+        elif parts[0] == "logs":
+            await handle_logs_callback(query, parts, context)
+        elif parts[0] == "logs50":
+            # More logs (50 lines)
+            parts[0] = "logs"
+            await handle_logs_callback(query, parts, context, lines=50)
     except Exception as e:
         logger.error(f"Callback error: {e}")
 
@@ -772,6 +836,24 @@ async def handle_menu_callback(query, parts, context):
             reply_markup=keyboard
         )
 
+    elif menu == "logs":
+        # Show container list for logs
+        containers = monitor.get_containers()
+        buttons = []
+        for c in containers:
+            buttons.append([InlineKeyboardButton(
+                f"{c.name}",
+                callback_data=f"logs:{c.name}"
+            )])
+        buttons.append([InlineKeyboardButton("Back", callback_data="menu:dashboard")])
+        keyboard = InlineKeyboardMarkup(buttons)
+
+        await query.message.edit_text(
+            "```\nSelect container for logs:\n```",
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard
+        )
+
     elif menu == "main":
         await query.message.edit_text("Use /start to return to main menu.")
 
@@ -813,6 +895,75 @@ async def handle_servers_callback(query, parts, context):
 
     if action == "refresh":
         await query.answer("Servers refreshed")
+
+
+async def handle_logs_callback(query, parts, context, lines=25):
+    """Handle logs callbacks - show container logs."""
+    if len(parts) < 2:
+        await query.answer("Invalid container")
+        return
+
+    container_name = parts[1]
+    await query.answer(f"Loading logs for {container_name}...")
+
+    # Get logs
+    logs = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: get_container_logs_sync(container_name, lines)
+    )
+
+    # Escape special characters for MarkdownV2
+    def escape_md(text):
+        chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for c in chars:
+            text = text.replace(c, f'\\{c}')
+        return text
+
+    # Truncate if too long (Telegram limit ~4096)
+    if len(logs) > 3500:
+        logs = logs[-3500:]
+        logs = "...(truncated)\n" + logs
+
+    escaped_logs = escape_md(logs)
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Refresh", callback_data=f"logs:{container_name}"),
+            InlineKeyboardButton("More (50)", callback_data=f"logs50:{container_name}"),
+        ],
+        [InlineKeyboardButton("Back to /logs", callback_data="menu:logs")]
+    ])
+
+    try:
+        await query.message.edit_text(
+            f"```\n{container_name} logs:\n\n{escaped_logs}\n```",
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        # If message too long or other error, send plain text
+        await query.message.edit_text(
+            f"Logs for {container_name}:\n\n{logs[:3000]}",
+            reply_markup=keyboard
+        )
+
+
+def get_container_logs_sync(container_name: str, lines: int = 30) -> str:
+    """Get logs from a Docker container (sync version)."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["docker", "logs", container_name, "--tail", str(lines)],
+            capture_output=True, text=True, timeout=10
+        )
+        output = result.stdout or result.stderr
+        if output:
+            return output.strip()
+        return "No logs available"
+    except subprocess.TimeoutExpired:
+        return "Timeout getting logs"
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 
 # === Background Jobs ===
@@ -896,6 +1047,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("servers", cmd_servers))
     app.add_handler(CommandHandler("alerts", cmd_alerts))
+    app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("config", cmd_config))
     app.add_handler(CommandHandler("help", cmd_help))
