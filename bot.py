@@ -128,79 +128,169 @@ def authorized(func):
 
 # === Mock Data Generator ===
 
-class MockDataProvider:
-    """Provides mock data for standalone testing."""
+class RealDataProvider:
+    """Provides real system monitoring data."""
 
-    @staticmethod
-    def get_servers() -> list[ServerMetrics]:
-        """Generate mock server metrics."""
-        return [
-            ServerMetrics(
-                name="prod-api-1",
-                cpu_percent=random.randint(15, 45),
-                mem_percent=random.randint(30, 50),
-                disk_percent=random.randint(40, 60),
-                status=NodeStatus.OK
-            ),
-            ServerMetrics(
-                name="prod-api-2",
-                cpu_percent=random.randint(60, 95),
-                mem_percent=random.randint(60, 80),
-                disk_percent=random.randint(50, 70),
-                status=NodeStatus.WARNING if random.random() > 0.5 else NodeStatus.OK
-            ),
-            ServerMetrics(
-                name="prod-db-1",
-                cpu_percent=random.randint(10, 30),
-                mem_percent=random.randint(70, 90),
-                disk_percent=random.randint(75, 95),
-                status=NodeStatus.OK
-            ),
-            ServerMetrics(
-                name="staging-1",
-                cpu_percent=None,
-                mem_percent=None,
-                disk_percent=None,
-                status=NodeStatus.OFFLINE
-            ),
-        ]
+    # Thresholds for alerts
+    CPU_WARNING = 80
+    CPU_CRITICAL = 95
+    MEM_WARNING = 80
+    MEM_CRITICAL = 95
+    DISK_WARNING = 80
+    DISK_CRITICAL = 95
 
-    @staticmethod
-    def get_containers() -> list[ContainerInfo]:
-        """Generate mock container info."""
-        return [
-            ContainerInfo("nginx", ContainerStatus.RUNNING, "12h"),
-            ContainerInfo("postgres", ContainerStatus.RUNNING, "5d"),
-            ContainerInfo("redis", ContainerStatus.RUNNING, "5d"),
-            ContainerInfo("app-worker", ContainerStatus.STOPPED, "2h ago"),
-        ]
+    def __init__(self):
+        self._last_alerts: list[Alert] = []
+        self._last_critical: Optional[Alert] = None
 
-    @staticmethod
-    def get_alerts() -> list[Alert]:
-        """Generate mock alerts."""
+    def get_servers(self) -> list[ServerMetrics]:
+        """Get real server metrics."""
+        import subprocess
+        import socket
+
+        hostname = socket.gethostname()[:15]
+        metrics = ServerMetrics(
+            name=hostname,
+            cpu_percent=None,
+            mem_percent=None,
+            disk_percent=None,
+            status=NodeStatus.OK
+        )
+
+        try:
+            # Get CPU usage
+            result = subprocess.run(
+                ["sh", "-c", "top -bn1 | grep 'Cpu(s)' | awk '{print $2}'"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                cpu = float(result.stdout.strip().replace(',', '.'))
+                metrics.cpu_percent = cpu
+
+            # Get memory usage
+            result = subprocess.run(
+                ["sh", "-c", "free | grep Mem | awk '{printf \"%.1f\", $3/$2 * 100}'"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                metrics.mem_percent = float(result.stdout.strip())
+
+            # Get disk usage
+            result = subprocess.run(
+                ["sh", "-c", "df / | tail -1 | awk '{print $5}' | tr -d '%'"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                metrics.disk_percent = float(result.stdout.strip())
+
+            # Determine status
+            if (metrics.cpu_percent and metrics.cpu_percent >= self.CPU_CRITICAL) or \
+               (metrics.mem_percent and metrics.mem_percent >= self.MEM_CRITICAL) or \
+               (metrics.disk_percent and metrics.disk_percent >= self.DISK_CRITICAL):
+                metrics.status = NodeStatus.CRITICAL
+            elif (metrics.cpu_percent and metrics.cpu_percent >= self.CPU_WARNING) or \
+                 (metrics.mem_percent and metrics.mem_percent >= self.MEM_WARNING) or \
+                 (metrics.disk_percent and metrics.disk_percent >= self.DISK_WARNING):
+                metrics.status = NodeStatus.WARNING
+
+        except Exception as e:
+            logger.error(f"Failed to get server metrics: {e}")
+            metrics.status = NodeStatus.OFFLINE
+
+        return [metrics]
+
+    def get_containers(self) -> list[ContainerInfo]:
+        """Get real Docker container info."""
+        import subprocess
+
+        containers = []
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "-a", "--format", "{{.Names}}|{{.Status}}|{{.State}}"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if not line:
+                        continue
+                    parts = line.split('|')
+                    if len(parts) >= 3:
+                        name = parts[0][:15]
+                        status_text = parts[1]
+                        state = parts[2].lower()
+
+                        # Parse uptime from status
+                        uptime = "unknown"
+                        if "Up" in status_text:
+                            # "Up 3 days" -> "3d"
+                            import re
+                            match = re.search(r'Up\s+(\d+)\s+(\w+)', status_text)
+                            if match:
+                                num, unit = match.groups()
+                                uptime = f"{num}{unit[0]}"
+
+                        if state == "running":
+                            status = ContainerStatus.RUNNING
+                        elif state == "exited":
+                            status = ContainerStatus.STOPPED
+                            uptime = "stopped"
+                        elif state == "restarting":
+                            status = ContainerStatus.RESTARTING
+                        else:
+                            status = ContainerStatus.ERROR
+
+                        containers.append(ContainerInfo(name, status, uptime))
+
+        except Exception as e:
+            logger.error(f"Failed to get containers: {e}")
+
+        return containers
+
+    def get_alerts(self) -> list[Alert]:
+        """Get current alerts based on thresholds."""
         alerts = []
-        if random.random() > 0.3:
-            alerts.append(Alert("!", "High CPU: prod-api-2 (89%)"))
-        if random.random() > 0.5:
-            alerts.append(Alert("i", "Disk warning: prod-db-1 (88%)"))
+        servers = self.get_servers()
+
+        for server in servers:
+            if server.cpu_percent and server.cpu_percent >= self.CPU_WARNING:
+                level = "!" if server.cpu_percent >= self.CPU_CRITICAL else "i"
+                alerts.append(Alert(level, f"CPU {server.cpu_percent:.0f}% on {server.name}"))
+
+            if server.mem_percent and server.mem_percent >= self.MEM_WARNING:
+                level = "!" if server.mem_percent >= self.MEM_CRITICAL else "i"
+                alerts.append(Alert(level, f"Memory {server.mem_percent:.0f}% on {server.name}"))
+
+            if server.disk_percent and server.disk_percent >= self.DISK_WARNING:
+                level = "!" if server.disk_percent >= self.DISK_CRITICAL else "i"
+                alerts.append(Alert(level, f"Disk {server.disk_percent:.0f}% on {server.name}"))
+
+        # Check for stopped containers
+        containers = self.get_containers()
+        stopped = [c for c in containers if c.status == ContainerStatus.STOPPED]
+        for c in stopped:
+            alerts.append(Alert("i", f"Container {c.name} stopped"))
+
+        self._last_alerts = alerts
         return alerts
 
-    @staticmethod
-    def check_critical_alerts() -> Optional[Alert]:
-        """Check for critical alerts (simulated)."""
-        # Simulate critical alert with 20% chance
-        if random.random() > 0.8:
-            alerts = [
-                Alert("!", f"CRITICAL: Server prod-api-2 CPU at {random.randint(90, 99)}%"),
-                Alert("!", f"CRITICAL: Database connection lost"),
-                Alert("!", f"CRITICAL: Disk space < 5% on prod-db-1"),
-                Alert("!", f"CRITICAL: Memory exhausted on prod-api-1"),
-            ]
-            return random.choice(alerts)
+    def check_critical_alerts(self) -> Optional[Alert]:
+        """Check for critical alerts."""
+        alerts = self.get_alerts()
+        critical = [a for a in alerts if a.level == "!"]
+
+        if critical:
+            # Return new critical alert if different from last
+            new_alert = critical[0]
+            if self._last_critical is None or self._last_critical.message != new_alert.message:
+                self._last_critical = new_alert
+                return new_alert
+        else:
+            self._last_critical = None
+
         return None
 
 
-mock_data = MockDataProvider()
+monitor = RealDataProvider()
 
 
 # === Dashboard State ===
@@ -219,9 +309,9 @@ class DashboardState:
             return
 
         try:
-            servers = mock_data.get_servers()
-            containers = mock_data.get_containers()
-            alerts = mock_data.get_alerts()
+            servers = monitor.get_servers()
+            containers = monitor.get_containers()
+            alerts = monitor.get_alerts()
 
             content = self.renderer.render(
                 servers=servers,
@@ -321,9 +411,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     try:
-        servers = mock_data.get_servers()
-        containers = mock_data.get_containers()
-        alerts = mock_data.get_alerts()
+        servers = monitor.get_servers()
+        containers = monitor.get_containers()
+        alerts = monitor.get_alerts()
 
         content = dashboard_state.renderer.render(
             servers=servers,
@@ -350,7 +440,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @authorized
 async def cmd_servers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /servers command."""
-    servers = mock_data.get_servers()
+    servers = monitor.get_servers()
     r = dashboard_state.renderer
 
     lines = [
@@ -382,7 +472,7 @@ async def cmd_servers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @authorized
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /alerts command."""
-    alerts = mock_data.get_alerts()
+    alerts = monitor.get_alerts()
     r = dashboard_state.renderer
 
     if not alerts:
@@ -578,9 +668,9 @@ async def handle_menu_callback(query, parts, context):
     if menu == "dashboard":
         # Start new dashboard
         chat_id = query.message.chat_id
-        servers = mock_data.get_servers()
-        containers = mock_data.get_containers()
-        alerts = mock_data.get_alerts()
+        servers = monitor.get_servers()
+        containers = monitor.get_containers()
+        alerts = monitor.get_alerts()
 
         content = dashboard_state.renderer.render(
             servers=servers,
@@ -598,7 +688,7 @@ async def handle_menu_callback(query, parts, context):
         dashboard_state.active_messages[chat_id] = message
 
     elif menu == "servers":
-        servers = mock_data.get_servers()
+        servers = monitor.get_servers()
         lines = [
             "+==================================+",
             "| SERVER LIST                      |",
@@ -623,7 +713,7 @@ async def handle_menu_callback(query, parts, context):
         )
 
     elif menu == "alerts":
-        alerts = mock_data.get_alerts()
+        alerts = monitor.get_alerts()
         if not alerts:
             lines = [
                 "+==================================+",
@@ -735,7 +825,7 @@ async def dashboard_refresh_job(context: ContextTypes.DEFAULT_TYPE):
 async def critical_alert_job(context: ContextTypes.DEFAULT_TYPE):
     """Background job to check and send critical alerts every 10s."""
     # Check for new critical alerts
-    critical = mock_data.check_critical_alerts()
+    critical = monitor.check_critical_alerts()
 
     if critical:
         # Add to history
