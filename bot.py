@@ -11,8 +11,10 @@ import asyncio
 import functools
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
+from dataclasses import dataclass, field
+from collections import deque
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import (
@@ -21,9 +23,82 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
+from telegram.error import BadRequest
 
 from config import settings
 from dashboard import DashboardRenderer, ServerMetrics, ContainerInfo, Alert, NodeStatus, ContainerStatus
+
+
+# === Alert History ===
+
+@dataclass
+class AlertRecord:
+    """Record of an alert with timestamp."""
+    id: str
+    level: str  # "!" for critical, "i" for info/warning
+    message: str
+    source: str
+    timestamp: datetime
+    acknowledged: bool = False
+
+
+class AlertManager:
+    """Manages alerts, history, and notifications."""
+
+    def __init__(self, max_history: int = 100):
+        self.history: deque[AlertRecord] = deque(maxlen=max_history)
+        self.active_alert_messages: dict[int, int] = {}  # chat_id -> message_id
+        self.last_critical: Optional[AlertRecord] = None
+        self.alert_counter = 0
+
+    def add_alert(self, level: str, message: str, source: str = "system") -> AlertRecord:
+        """Add new alert to history."""
+        self.alert_counter += 1
+        alert = AlertRecord(
+            id=f"ALR-{self.alert_counter:04d}",
+            level=level,
+            message=message,
+            source=source,
+            timestamp=datetime.utcnow()
+        )
+        self.history.append(alert)
+
+        if level == "!":
+            self.last_critical = alert
+
+        return alert
+
+    def get_history(self, limit: int = 20) -> list[AlertRecord]:
+        """Get recent alert history."""
+        return list(self.history)[-limit:]
+
+    def get_active_critical(self) -> Optional[AlertRecord]:
+        """Get current active critical alert."""
+        if self.last_critical and not self.last_critical.acknowledged:
+            return self.last_critical
+        return None
+
+    def acknowledge(self, alert_id: str) -> bool:
+        """Acknowledge an alert."""
+        for alert in self.history:
+            if alert.id == alert_id:
+                alert.acknowledged = True
+                return True
+        return False
+
+    def acknowledge_all(self):
+        """Acknowledge all alerts."""
+        for alert in self.history:
+            alert.acknowledged = True
+        self.last_critical = None
+
+    def clear_active_message(self, chat_id: int):
+        """Clear active alert message reference."""
+        if chat_id in self.active_alert_messages:
+            del self.active_alert_messages[chat_id]
+
+
+alert_manager = AlertManager()
 
 # Configure logging
 logging.basicConfig(
@@ -109,6 +184,20 @@ class MockDataProvider:
         if random.random() > 0.5:
             alerts.append(Alert("i", "Disk warning: prod-db-1 (88%)"))
         return alerts
+
+    @staticmethod
+    def check_critical_alerts() -> Optional[Alert]:
+        """Check for critical alerts (simulated)."""
+        # Simulate critical alert with 20% chance
+        if random.random() > 0.8:
+            alerts = [
+                Alert("!", f"CRITICAL: Server prod-api-2 CPU at {random.randint(90, 99)}%"),
+                Alert("!", f"CRITICAL: Database connection lost"),
+                Alert("!", f"CRITICAL: Disk space < 5% on prod-db-1"),
+                Alert("!", f"CRITICAL: Memory exhausted on prod-api-1"),
+            ]
+            return random.choice(alerts)
+        return None
 
 
 mock_data = MockDataProvider()
@@ -377,6 +466,7 @@ COMMANDS:
   /status  - Live dashboard
   /servers - List all servers
   /alerts  - View active alerts
+  /history - Alert history
   /config  - Bot settings
   /help    - This help
 
@@ -388,9 +478,52 @@ DASHBOARD:
 ALERTS:
   [!] - Critical alert
   [i] - Info/Warning
+
+Critical alerts are sent as
+separate messages every 10s
 ```
 """
     await update.message.reply_text(text, parse_mode="MarkdownV2")
+
+
+@authorized
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /history command - show alert history."""
+    history = alert_manager.get_history(20)
+
+    if not history:
+        await update.message.reply_text("```\nNo alerts in history.\n```", parse_mode="MarkdownV2")
+        return
+
+    lines = [
+        "+==================================+",
+        "| ALERT HISTORY                    |",
+        "+----------------------------------+",
+    ]
+
+    for alert in reversed(history[-10:]):
+        time_str = alert.timestamp.strftime("%H:%M:%S")
+        ack = "v" if alert.acknowledged else " "
+        msg = alert.message[:22]
+        lines.append(f"| [{alert.level}][{ack}] {time_str} {msg:<12}|")
+
+    lines.append("+----------------------------------+")
+    lines.append(f"| Total: {len(history)} alerts              |")
+    lines.append("+==================================+")
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Ack All", callback_data="alerts:ack_all"),
+            InlineKeyboardButton("Refresh", callback_data="history:refresh"),
+        ],
+        [InlineKeyboardButton("Back", callback_data="menu:dashboard")]
+    ])
+
+    await update.message.reply_text(
+        f"```\n{chr(10).join(lines)}\n```",
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard
+    )
 
 
 # === Callback Handlers ===
@@ -412,8 +545,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_config_callback(query, parts, context)
         elif parts[0] == "alerts":
             await handle_alerts_callback(query, parts, context)
+        elif parts[0] == "alert":
+            await handle_alerts_callback(query, parts, context)
         elif parts[0] == "servers":
             await handle_servers_callback(query, parts, context)
+        elif parts[0] == "history":
+            await query.answer("Use /history command")
     except Exception as e:
         logger.error(f"Callback error: {e}")
 
@@ -562,9 +699,22 @@ async def handle_alerts_callback(query, parts, context):
     action = parts[1] if len(parts) > 1 else None
 
     if action == "ack_all":
+        alert_manager.acknowledge_all()
         await query.answer("All alerts acknowledged")
     elif action == "refresh":
         await query.answer("Alerts refreshed")
+    elif action == "ack" and len(parts) >= 3:
+        alert_id = parts[2]
+        if alert_manager.acknowledge(alert_id):
+            # Clear active message for this user
+            alert_manager.clear_active_message(query.from_user.id)
+            await query.message.edit_text(
+                f"```\nAlert {alert_id} acknowledged.\n```",
+                parse_mode="MarkdownV2"
+            )
+            await query.answer("Alert acknowledged")
+        else:
+            await query.answer("Alert not found")
 
 
 async def handle_servers_callback(query, parts, context):
@@ -580,6 +730,58 @@ async def handle_servers_callback(query, parts, context):
 async def dashboard_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     """Background job to refresh dashboards."""
     await dashboard_state.update_dashboard(context)
+
+
+async def critical_alert_job(context: ContextTypes.DEFAULT_TYPE):
+    """Background job to check and send critical alerts every 10s."""
+    # Check for new critical alerts
+    critical = mock_data.check_critical_alerts()
+
+    if critical:
+        # Add to history
+        record = alert_manager.add_alert(critical.level, critical.message, "monitor")
+        logger.warning(f"Critical alert: {critical.message}")
+
+        # Send/update alert message to all users
+        for user_id in settings.allowed_user_ids:
+            try:
+                # Create alert message
+                lines = [
+                    "+==================================+",
+                    "|    !! CRITICAL ALERT !!         |",
+                    "+----------------------------------+",
+                    f"| {record.timestamp.strftime('%H:%M:%S')}                        |",
+                    f"| {critical.message[:30]:<30} |",
+                    "+----------------------------------+",
+                    f"| ID: {record.id}                     |",
+                    "+==================================+",
+                ]
+
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Acknowledge", callback_data=f"alert:ack:{record.id}")],
+                ])
+
+                # Delete old alert message if exists
+                if user_id in alert_manager.active_alert_messages:
+                    try:
+                        await context.bot.delete_message(
+                            chat_id=user_id,
+                            message_id=alert_manager.active_alert_messages[user_id]
+                        )
+                    except BadRequest:
+                        pass  # Message already deleted
+
+                # Send new alert
+                msg = await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"```\n{chr(10).join(lines)}\n```",
+                    parse_mode="MarkdownV2",
+                    reply_markup=keyboard
+                )
+                alert_manager.active_alert_messages[user_id] = msg.message_id
+
+            except Exception as e:
+                logger.error(f"Failed to send critical alert to {user_id}: {e}")
 
 
 # === Error Handler ===
@@ -604,6 +806,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("servers", cmd_servers))
     app.add_handler(CommandHandler("alerts", cmd_alerts))
+    app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("config", cmd_config))
     app.add_handler(CommandHandler("help", cmd_help))
 
@@ -613,15 +816,24 @@ def main():
     # Add error handler
     app.add_error_handler(error_handler)
 
-    # Add background job for dashboard refresh
+    # Add background jobs
     job_queue = app.job_queue
     if job_queue:
+        # Dashboard refresh every 30s
         job_queue.run_repeating(
             dashboard_refresh_job,
             interval=settings.dashboard_refresh_interval,
             first=10
         )
         logger.info(f"Dashboard auto-refresh: every {settings.dashboard_refresh_interval}s")
+
+        # Critical alert check every 10s
+        job_queue.run_repeating(
+            critical_alert_job,
+            interval=10,
+            first=5
+        )
+        logger.info("Critical alert check: every 10s")
 
     logger.info("Bot started! Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
