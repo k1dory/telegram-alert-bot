@@ -436,6 +436,7 @@ async def handle_dashboard_callback(query, parts, context):
 async def handle_menu_callback(query, parts, context):
     """Handle menu navigation callbacks."""
     menu = parts[1] if len(parts) > 1 else "main"
+    r = dashboard_state.renderer
 
     if menu == "dashboard":
         # Start new dashboard
@@ -458,6 +459,91 @@ async def handle_menu_callback(query, parts, context):
             reply_markup=keyboard
         )
         dashboard_state.active_messages[chat_id] = message
+
+    elif menu == "servers":
+        servers = mock_data.get_servers()
+        lines = [
+            "+==================================+",
+            "| SERVER LIST                      |",
+            "+----------------------------------+",
+        ]
+        for s in servers:
+            name = s.name[:12].ljust(12)
+            cpu = f"{s.cpu_percent}%" if s.cpu_percent else "---"
+            stat = "OK" if s.status == NodeStatus.OK else "--" if s.status == NodeStatus.OFFLINE else "!!"
+            lines.append(f"| {name} CPU:{cpu:>4} [{stat}]     |")
+        lines.append("+==================================+")
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Refresh", callback_data="menu:servers")],
+            [InlineKeyboardButton("Back", callback_data="menu:dashboard")]
+        ])
+
+        await query.message.edit_text(
+            f"```\n{chr(10).join(lines)}\n```",
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard
+        )
+
+    elif menu == "alerts":
+        alerts = mock_data.get_alerts()
+        if not alerts:
+            lines = [
+                "+==================================+",
+                "| NO ACTIVE ALERTS                 |",
+                "+==================================+",
+            ]
+        else:
+            lines = [
+                "+==================================+",
+                f"| ALERTS ({len(alerts)})                        |",
+                "+----------------------------------+",
+            ]
+            for a in alerts:
+                msg = a.message[:28]
+                lines.append(f"| [{a.level}] {msg:<28} |")
+            lines.append("+==================================+")
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Ack All", callback_data="alerts:ack_all"),
+                InlineKeyboardButton("Refresh", callback_data="menu:alerts"),
+            ],
+            [InlineKeyboardButton("Back", callback_data="menu:dashboard")]
+        ])
+
+        await query.message.edit_text(
+            f"```\n{chr(10).join(lines)}\n```",
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard
+        )
+
+    elif menu == "settings":
+        refresh = dashboard_state.refresh_interval
+        lines = [
+            "+==================================+",
+            "| SETTINGS                         |",
+            "+----------------------------------+",
+            f"| Refresh interval: {refresh}s           |",
+            "| Discovery: auto                  |",
+            "| 2FA: enabled                     |",
+            "+==================================+",
+        ]
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("30s", callback_data="config:refresh:30"),
+                InlineKeyboardButton("60s", callback_data="config:refresh:60"),
+                InlineKeyboardButton("120s", callback_data="config:refresh:120"),
+            ],
+            [InlineKeyboardButton("Back", callback_data="menu:dashboard")]
+        ])
+
+        await query.message.edit_text(
+            f"```\n{chr(10).join(lines)}\n```",
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard
+        )
 
     elif menu == "main":
         await query.message.edit_text("Use /start to return to main menu.")

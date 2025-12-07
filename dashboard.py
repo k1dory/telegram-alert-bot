@@ -1,6 +1,6 @@
 """
 ASCII Dashboard renderer for Telegram.
-Style: Variant B - Clean with sections.
+Simple ASCII style that works on all devices.
 """
 
 from dataclasses import dataclass
@@ -51,92 +51,61 @@ class Alert:
 class DashboardRenderer:
     """Renders ASCII dashboard for Telegram."""
 
-    # Box drawing characters
-    TOP_LEFT = "\u250f"      # ┏
-    TOP_RIGHT = "\u2513"     # ┓
-    BOTTOM_LEFT = "\u2517"   # ┗
-    BOTTOM_RIGHT = "\u251b"  # ┛
-    HORIZONTAL = "\u2501"    # ━
-    VERTICAL = "\u2503"      # ┃
-    T_RIGHT = "\u2523"       # ┣
-    T_LEFT = "\u252b"        # ┫
+    # Simple ASCII characters that work everywhere
+    TOP_LEFT = "+"
+    TOP_RIGHT = "+"
+    BOTTOM_LEFT = "+"
+    BOTTOM_RIGHT = "+"
+    HORIZONTAL = "-"
+    VERTICAL = "|"
+    T_RIGHT = "+"
+    T_LEFT = "+"
 
-    # Inner box
-    INNER_TL = "\u250c"      # ┌
-    INNER_TR = "\u2510"      # ┐
-    INNER_BL = "\u2514"      # └
-    INNER_BR = "\u2518"      # ┘
-    INNER_H = "\u2500"       # ─
-    INNER_V = "\u2502"       # │
+    # Inner box (same as outer for simplicity)
+    INNER_TL = "+"
+    INNER_TR = "+"
+    INNER_BL = "+"
+    INNER_BR = "+"
+    INNER_H = "-"
+    INNER_V = "|"
 
     # Status indicators
-    STATUS_OK = "[#]"        # ■
-    STATUS_WARN = "[!]"
-    STATUS_OFFLINE = "[ ]"   # □
+    STATUS_OK = "[OK]"
+    STATUS_WARN = "[!!]"
+    STATUS_OFFLINE = "[--]"
 
-    WIDTH = 43  # Total width of dashboard
+    WIDTH = 36  # Narrower for mobile
 
     def __init__(self):
         self.last_update: Optional[datetime] = None
 
-    def _center(self, text: str, width: int = None) -> str:
-        """Center text within width."""
-        w = width or (self.WIDTH - 4)
-        return text.center(w)
+    def _line(self, char: str = "-") -> str:
+        """Create horizontal line."""
+        return "+" + char * (self.WIDTH - 2) + "+"
 
-    def _pad_line(self, content: str) -> str:
-        """Pad line to fit within borders."""
-        inner_width = self.WIDTH - 4
-        if len(content) > inner_width:
-            content = content[:inner_width]
-        return f"{self.VERTICAL}  {content.ljust(inner_width)}{self.VERTICAL}"
-
-    def _top_border(self) -> str:
-        return f"{self.TOP_LEFT}{self.HORIZONTAL * (self.WIDTH - 2)}{self.TOP_RIGHT}"
-
-    def _bottom_border(self) -> str:
-        return f"{self.BOTTOM_LEFT}{self.HORIZONTAL * (self.WIDTH - 2)}{self.BOTTOM_RIGHT}"
-
-    def _separator(self) -> str:
-        return f"{self.T_RIGHT}{self.HORIZONTAL * (self.WIDTH - 2)}{self.T_LEFT}"
-
-    def _empty_line(self) -> str:
-        return self._pad_line("")
-
-    def _inner_box_top(self, title: str) -> str:
-        """Create inner box top with title."""
-        title_part = f"{self.INNER_H} {title} "
-        remaining = self.WIDTH - 8 - len(title_part)
-        return f"{self.VERTICAL}  {self.INNER_TL}{title_part}{self.INNER_H * remaining}{self.INNER_TR}  {self.VERTICAL}"
-
-    def _inner_box_bottom(self) -> str:
-        """Create inner box bottom."""
-        inner_width = self.WIDTH - 8
-        return f"{self.VERTICAL}  {self.INNER_BL}{self.INNER_H * inner_width}{self.INNER_BR}  {self.VERTICAL}"
-
-    def _inner_box_line(self, content: str) -> str:
-        """Create inner box content line."""
-        inner_width = self.WIDTH - 10
-        if len(content) > inner_width:
-            content = content[:inner_width]
-        return f"{self.VERTICAL}  {self.INNER_V}  {content.ljust(inner_width - 2)}{self.INNER_V}  {self.VERTICAL}"
+    def _row(self, content: str) -> str:
+        """Create content row."""
+        inner = self.WIDTH - 4
+        if len(content) > inner:
+            content = content[:inner]
+        return "| " + content.ljust(inner) + " |"
 
     def _format_status(self, status: NodeStatus) -> str:
         """Format node status indicator."""
         if status == NodeStatus.OK:
-            return self.STATUS_OK
+            return "OK"
         elif status == NodeStatus.WARNING:
-            return self.STATUS_WARN
+            return "!!"
         elif status == NodeStatus.CRITICAL:
-            return self.STATUS_WARN
-        return self.STATUS_OFFLINE
+            return "!!"
+        return "--"
 
     def _format_container_status(self, status: ContainerStatus) -> str:
         """Format container status."""
         if status == ContainerStatus.RUNNING:
-            return "#"  # ■
+            return "+"
         elif status == ContainerStatus.STOPPED:
-            return " "  # □
+            return "-"
         elif status == ContainerStatus.RESTARTING:
             return "~"
         return "x"
@@ -145,7 +114,7 @@ class DashboardRenderer:
         """Format percentage value."""
         if value is None:
             return "---"
-        return f"{int(value)}%"
+        return f"{int(value):3d}%"
 
     def render(
         self,
@@ -162,71 +131,52 @@ class DashboardRenderer:
         lines = []
 
         # Header
-        lines.append(self._top_border())
-        lines.append(self._pad_line(self._center("INFRASTRUCTURE MONITOR")))
-        lines.append(self._pad_line(self._center(time_str)))
-        lines.append(self._separator())
-        lines.append(self._empty_line())
+        lines.append(self._line("="))
+        lines.append(self._row("INFRASTRUCTURE MONITOR"))
+        lines.append(self._row(time_str.center(self.WIDTH - 4)))
+        lines.append(self._line("="))
 
         # Servers section
-        lines.append(self._inner_box_top("SERVERS"))
-        lines.append(self._inner_box_line(""))
-        lines.append(self._inner_box_line("NAME          CPU   MEM   STAT"))
-        lines.append(self._inner_box_line(self.INNER_H * 30))
+        lines.append(self._row(""))
+        lines.append(self._row("SERVERS:"))
+        lines.append(self._row("-" * (self.WIDTH - 4)))
 
         for server in servers:
             cpu = self._format_percent(server.cpu_percent)
             mem = self._format_percent(server.mem_percent)
             stat = self._format_status(server.status)
-            name = server.name[:12].ljust(12)
-            line = f"{name}  {cpu:>4}  {mem:>4}  {stat}"
-            lines.append(self._inner_box_line(line))
-
-        lines.append(self._inner_box_line(""))
-        lines.append(self._inner_box_bottom())
-        lines.append(self._empty_line())
+            name = server.name[:10].ljust(10)
+            line = f"{name} CPU:{cpu} MEM:{mem} [{stat}]"
+            lines.append(self._row(line))
 
         # Containers section
-        if containers:
-            lines.append(self._inner_box_top("CONTAINERS"))
-            lines.append(self._inner_box_line(""))
+        lines.append(self._row(""))
+        lines.append(self._row("CONTAINERS:"))
+        lines.append(self._row("-" * (self.WIDTH - 4)))
 
-            # Group containers in rows of 3
-            for i in range(0, len(containers), 3):
-                chunk = containers[i:i+3]
-                parts = []
-                for c in chunk:
-                    status_char = self._format_container_status(c.status)
-                    parts.append(f"{status_char} {c.name[:10]:<10}")
-                line = "  ".join(parts)
-                lines.append(self._inner_box_line(line))
+        running = [c for c in containers if c.status == ContainerStatus.RUNNING]
+        stopped = [c for c in containers if c.status != ContainerStatus.RUNNING]
 
-            # Show stopped containers separately
-            stopped = [c for c in containers if c.status == ContainerStatus.STOPPED]
-            for c in stopped:
-                lines.append(self._inner_box_line(f"  {c.name} (stopped {c.uptime})"))
+        if running:
+            names = ", ".join([c.name[:8] for c in running[:4]])
+            lines.append(self._row(f"[+] {names}"))
 
-            lines.append(self._inner_box_line(""))
-            lines.append(self._inner_box_bottom())
-            lines.append(self._empty_line())
+        for c in stopped[:2]:
+            lines.append(self._row(f"[-] {c.name} ({c.uptime})"))
 
         # Alerts section
-        alert_count = len(alerts)
-        if alert_count > 0:
-            lines.append(self._inner_box_top(f"ALERTS ({alert_count})"))
-            for alert in alerts[:5]:  # Max 5 alerts
-                line = f"[{alert.level}] {alert.message[:28]}"
-                lines.append(self._inner_box_line(line))
-            lines.append(self._inner_box_bottom())
-            lines.append(self._empty_line())
+        if alerts:
+            lines.append(self._row(""))
+            lines.append(self._row(f"ALERTS ({len(alerts)}):"))
+            lines.append(self._row("-" * (self.WIDTH - 4)))
+            for alert in alerts[:3]:
+                msg = alert.message[:28]
+                lines.append(self._row(f"[{alert.level}] {msg}"))
 
         # Footer
-        lines.append(self._separator())
-        footer1 = f"Last alert: {alerts[0].message[:20] if alerts else 'None'}..."
-        footer2 = f"Auto-refresh: {refresh_interval}s"
-        lines.append(self._pad_line(f"> {footer1[:35]}"))
-        lines.append(self._pad_line(f"> {footer2}"))
-        lines.append(self._bottom_border())
+        lines.append(self._line("-"))
+        lines.append(self._row(f"Refresh: {refresh_interval}s"))
+        lines.append(self._line("="))
 
         return "\n".join(lines)
 
@@ -236,18 +186,18 @@ class DashboardRenderer:
         time_str = now.strftime("%H:%M:%S")
 
         lines = [
-            f"{self.TOP_LEFT}{self.HORIZONTAL * 30}{self.TOP_RIGHT}",
-            f"{self.VERTICAL}  QUICK STATUS  {time_str}   {self.VERTICAL}",
-            f"{self.T_RIGHT}{self.HORIZONTAL * 30}{self.T_LEFT}",
+            self._line("="),
+            self._row(f"STATUS {time_str}"),
+            self._line("-"),
         ]
 
         for server in servers:
             stat = self._format_status(server.status)
             cpu = self._format_percent(server.cpu_percent)
-            name = server.name[:14].ljust(14)
-            lines.append(f"{self.VERTICAL} {stat} {name} {cpu:>4}   {self.VERTICAL}")
+            name = server.name[:12].ljust(12)
+            lines.append(self._row(f"{name} {cpu} [{stat}]"))
 
-        lines.append(f"{self.BOTTOM_LEFT}{self.HORIZONTAL * 30}{self.BOTTOM_RIGHT}")
+        lines.append(self._line("="))
 
         return "\n".join(lines)
 
@@ -256,19 +206,19 @@ class DashboardRenderer:
         now = datetime.utcnow()
         time_str = now.strftime("%H:%M:%S")
 
-        level_marker = "!!" if alert.level == "!" else "i "
-        server_str = f" on {server}" if server else ""
+        level_marker = "!!" if alert.level == "!" else "i"
 
         lines = [
-            f"{self.TOP_LEFT}{self.HORIZONTAL * 40}{self.TOP_RIGHT}",
-            f"{self.VERTICAL}  [{level_marker}] ALERT  {time_str}             {self.VERTICAL}",
-            f"{self.T_RIGHT}{self.HORIZONTAL * 40}{self.T_LEFT}",
-            f"{self.VERTICAL}                                        {self.VERTICAL}",
-            f"{self.VERTICAL}  {alert.message[:36]:<36}  {self.VERTICAL}",
-            f"{self.VERTICAL}  {server_str:<36}  {self.VERTICAL}",
-            f"{self.VERTICAL}                                        {self.VERTICAL}",
-            f"{self.BOTTOM_LEFT}{self.HORIZONTAL * 40}{self.BOTTOM_RIGHT}",
+            self._line("="),
+            self._row(f"[{level_marker}] ALERT {time_str}"),
+            self._line("-"),
+            self._row(alert.message[:self.WIDTH - 4]),
         ]
+
+        if server:
+            lines.append(self._row(f"Source: {server}"))
+
+        lines.append(self._line("="))
 
         return "\n".join(lines)
 

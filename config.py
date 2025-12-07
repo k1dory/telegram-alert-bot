@@ -26,20 +26,15 @@ class Settings(BaseSettings):
     # Telegram (required)
     telegram_bot_token: str = Field(..., description="Telegram Bot API token")
 
-    # Whitelist (empty = allow all)
-    allowed_user_ids: list[int] = Field(default_factory=list)
+    # Whitelist (empty = allow all) - stored as comma-separated string
+    allowed_user_ids_str: str = Field(default="", alias="ALLOWED_USER_IDS")
 
-    @field_validator("allowed_user_ids", mode="before")
-    @classmethod
-    def parse_user_ids(cls, v):
-        """Parse user IDs from string (comma-separated) or list."""
-        if isinstance(v, list):
-            return v
-        if isinstance(v, str):
-            if not v or v.strip() == "":
-                return []
-            return [int(x.strip()) for x in v.split(",") if x.strip()]
-        return []
+    @property
+    def allowed_user_ids(self) -> list[int]:
+        """Parse user IDs from comma-separated string."""
+        if not self.allowed_user_ids_str or self.allowed_user_ids_str.strip() == "":
+            return []
+        return [int(x.strip()) for x in self.allowed_user_ids_str.split(",") if x.strip()]
 
     # Dashboard
     dashboard_refresh_interval: int = Field(default=30)
