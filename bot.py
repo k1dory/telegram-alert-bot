@@ -381,6 +381,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {r.VERTICAL}  /servers - Server list                {r.VERTICAL}
 {r.VERTICAL}  /alerts  - View alerts                {r.VERTICAL}
 {r.VERTICAL}  /config  - Settings                   {r.VERTICAL}
+{r.VERTICAL}  /admin   - Admin list                 {r.VERTICAL}
 {r.VERTICAL}  /help    - Help                       {r.VERTICAL}
 {r.VERTICAL}                                        {r.VERTICAL}
 {r.BOTTOM_LEFT}{r.HORIZONTAL * 40}{r.BOTTOM_RIGHT}
@@ -400,6 +401,42 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         welcome,
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard
+    )
+
+
+@authorized
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin command - show admin list."""
+    r = dashboard_state.renderer
+    user = update.effective_user
+    admin_ids = settings.allowed_user_ids
+
+    lines = [
+        f"{r.TOP_LEFT}{r.HORIZONTAL * 40}{r.TOP_RIGHT}",
+        f"{r.VERTICAL}  ADMIN LIST                            {r.VERTICAL}",
+        f"{r.T_RIGHT}{r.HORIZONTAL * 40}{r.T_LEFT}",
+    ]
+
+    if not admin_ids:
+        lines.append(f"{r.VERTICAL}  No whitelist (all users allowed)      {r.VERTICAL}")
+    else:
+        for i, admin_id in enumerate(admin_ids, 1):
+            is_you = " (you)" if admin_id == user.id else ""
+            admin_str = f"{admin_id}{is_you}"
+            lines.append(f"{r.VERTICAL}  {i}. {admin_str:<35} {r.VERTICAL}")
+
+    lines.append(f"{r.T_RIGHT}{r.HORIZONTAL * 40}{r.T_LEFT}")
+    lines.append(f"{r.VERTICAL}  Total: {len(admin_ids)} admin(s)                    {r.VERTICAL}")
+    lines.append(f"{r.BOTTOM_LEFT}{r.HORIZONTAL * 40}{r.BOTTOM_RIGHT}")
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Back", callback_data="menu:main")]
+    ])
+
+    await update.message.reply_text(
+        f"```\n{chr(10).join(lines)}\n```",
         parse_mode="MarkdownV2",
         reply_markup=keyboard
     )
@@ -559,6 +596,7 @@ COMMANDS:
   /history - Alert history
   /logs    - Container logs
   /config  - Bot settings
+  /admin   - Admin list
   /help    - This help
 
 DASHBOARD:
@@ -1050,6 +1088,7 @@ def main():
     app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("config", cmd_config))
+    app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("help", cmd_help))
 
     # Add callback handler
